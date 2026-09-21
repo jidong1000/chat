@@ -2,7 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <title>共享聊天室</title>
 <style>
   * { box-sizing: border-box; }
@@ -16,16 +16,16 @@
              max(10px, env(safe-area-inset-bottom))
              max(10px, env(safe-area-inset-left));
     width: 100%;
-    height: var(--viewport-height, 100dvh);
+    height: 100%;
     overflow: hidden;
   }
 
   #auth { max-width: 320px; margin: 15vh auto; text-align: center; }
-  #auth input { width: 100%; margin: 6px 0; padding: 10px; border: 1px solid #ccc; border-radius: 6px; }
+  #auth input { width: 100%; margin: 6px 0; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 16px; }
   #authErr { color: #d9534f; margin-top: 8px; }
 
   #sidebar {
-    position: fixed; top: 0; left: -280px; width: 260px; height: var(--viewport-height, 100dvh);
+    position: fixed; top: 0; left: -280px; width: 260px; height: var(--app-height, 100dvh);
     background: #fff; box-shadow: 2px 0 10px rgba(0,0,0,.2);
     transition: left .25s; z-index: 20; padding: 20px; overflow-y: auto;
   }
@@ -49,13 +49,23 @@
   .btn.primary { background: #4a90d9; color: #fff; border-color: #4a90d9; }
   #bgPreview { width: 100%; border-radius: 6px; margin-top: 8px; display: none; }
 
-  /* 应用容器：flex 纵向布局，让 msgs 撑满、底部区域固定 */
+  /* 应用容器：整体跟随 visualViewport —— 键盘弹出时直接变矮，输入栏留在文档流里，
+     不再用 position:fixed 贴底（见 syncViewport()）。
+     注意：这里不要用 transform 做居中，否则 #sidebar/#overlay/#menuBtn 的包含块会变成它。 */
   #app {
     display: none;
-    height: 100%;
-    max-height: 100%;
+    position: fixed;
+    top: var(--app-top, 0px);
+    left: 50%;
+    margin-left: calc(min(600px, 100vw) * -0.5);
+    width: min(600px, 100vw);
+    height: var(--app-height, 100dvh);
     flex-direction: column;
     min-height: 0;
+    padding: max(10px, env(safe-area-inset-top))
+             max(10px, env(safe-area-inset-right))
+             max(10px, env(safe-area-inset-bottom))
+             max(10px, env(safe-area-inset-left));
   }
 
   /* 聊天区 */
@@ -71,9 +81,6 @@
     -webkit-overflow-scrolling: touch;
     overscroll-behavior: contain;
     -webkit-touch-callout: none;
-  }
-  body.keyboard-open #msgs {
-    padding-bottom: calc(10px + var(--bottom-height, 0px));
   }
   #chatBg {
     position: sticky;
@@ -143,17 +150,6 @@
     flex-direction: column;
     gap: 8px;
   }
-  body.keyboard-open #bottom {
-    position: fixed;
-    left: 50%;
-    bottom: 0;
-    width: min(600px, calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right)));
-    transform: translateX(-50%);
-    padding-bottom: max(4px, env(safe-area-inset-bottom));
-    background: #fff;
-    z-index: 6;
-  }
-
   /* 输入栏 */
   #bar { display: flex; gap: 6px; align-items: center; }
   #bar input#text { flex: 1; min-width: 0; padding: 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 16px; }
@@ -278,7 +274,7 @@
   .cropBtns { display: flex; gap: 12px; }
 
   @media (max-width: 420px) {
-    body { padding-left: max(6px, env(safe-area-inset-left)); padding-right: max(6px, env(safe-area-inset-right)); }
+    body, #app { padding-left: max(6px, env(safe-area-inset-left)); padding-right: max(6px, env(safe-area-inset-right)); }
     #msgs { padding: 8px; margin-top: 42px; }
     #bar { gap: 4px; }
     #bar button { padding-left: 10px; padding-right: 10px; }
@@ -512,31 +508,39 @@ function toggleSidebar(open) {
 const msgs = document.getElementById("msgs");
 const bgPreview = document.getElementById("bgPreview");
 const chatBg = document.getElementById("chatBg");
-const bottom = document.getElementById("bottom");
-let stableViewportHeight = 0;
-function updateViewportHeight() {
-  const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-  const keyboardOpen = stableViewportHeight > 0 && height < stableViewportHeight - 100;
-  document.documentElement.style.setProperty("--viewport-height", `${Math.round(height)}px`);
-  document.body.classList.toggle("keyboard-open", keyboardOpen);
-  updateBottomSpace(keyboardOpen);
-  if (!keyboardOpen) {
-    stableViewportHeight = height;
-    updateBackgroundSize();
+
+// iOS 上的 WebKit 至今没有实现 interactive-widget：键盘弹出时不会压缩 layout viewport，
+// 只有 visualViewport 变小，而且 iOS 还可能为了露出输入框把整页上滚（offsetTop > 0）。
+// 所以让整个 #app 统一跟随 visualViewport：键盘一弹出 #app 直接变矮，
+// #msgs 跟着变矮、输入栏留在文档流里天然贴在键盘上方，不再需要 fixed + 高度补偿。
+let lastAppHeight = 0;
+let keyboardOpen = false;   // 键盘是否弹出，由 syncViewport() 维护
+let stableHeight = 0;       // 键盘收起时的可视高度
+function syncViewport() {
+  const vv = window.visualViewport;
+  const layoutHeight = document.documentElement.clientHeight;
+  const height = Math.round(vv ? vv.height : window.innerHeight);
+  keyboardOpen = (stableHeight > 0 && height < stableHeight - 100) || height < layoutHeight - 100;
+  // 用户自己双指放大、且键盘没弹出时不干预；键盘弹出时必须继续适配，
+  // 否则一旦发生缩放，--app-height 会停在旧值，输入栏被顶出可视区
+  if (vv && vv.scale && Math.abs(vv.scale - 1) > 0.01 && !keyboardOpen) return;
+  if (!keyboardOpen) stableHeight = height;
+  // 只有键盘确实弹出时才跟随 iOS 的整页上滚：iOS 26 存在收起键盘后 offsetTop 不归零的问题
+  const top = keyboardOpen ? Math.round(vv ? vv.offsetTop : 0) : 0;
+  document.documentElement.style.setProperty("--app-height", `${height}px`);
+  document.documentElement.style.setProperty("--app-top", `${top}px`);
+  // 抵消 iOS 那段多余的整页滚动（底部 inset 与键盘 inset 相加造成的空白）
+  if (window.scrollY || document.documentElement.scrollTop) {
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
   }
-}
-function updateBottomSpace(keyboardOpen) {
-  if (!keyboardOpen) {
-    document.documentElement.style.setProperty("--bottom-height", "0px");
-    return;
+  if (height !== lastAppHeight) {
+    lastAppHeight = height;
+    requestAnimationFrame(() => { updateBackgroundSize(); scrollToLatest(); });
   }
-  requestAnimationFrame(() => {
-    document.documentElement.style.setProperty(
-      "--bottom-height", `${Math.ceil(bottom.getBoundingClientRect().height)}px`);
-    requestAnimationFrame(scrollToLatest);
-  });
 }
 function updateBackgroundSize() {
+  if (keyboardOpen) return;   // 键盘弹出时背景保持原尺寸，只被键盘遮挡（微信同款）
   if (msgs.clientHeight > 0) {
     document.documentElement.style.setProperty(
       "--background-height", `${Math.round(msgs.clientHeight)}px`);
@@ -545,10 +549,12 @@ function updateBackgroundSize() {
 function scrollToLatest() {
   msgs.scrollTop = Math.max(0, msgs.scrollHeight - msgs.clientHeight);
 }
-updateViewportHeight();
-window.addEventListener("resize", updateViewportHeight);
+syncViewport();
+window.addEventListener("resize", syncViewport);
+window.addEventListener("orientationchange", () => setTimeout(syncViewport, 250));
 if (window.visualViewport) {
-  window.visualViewport.addEventListener("resize", updateViewportHeight);
+  window.visualViewport.addEventListener("resize", syncViewport);
+  window.visualViewport.addEventListener("scroll", syncViewport);
 }
 
 // ================= 背景 =================
@@ -677,14 +683,15 @@ function toggleEmoji(e) {
 
 input.addEventListener("focus", () => {
   emojiPanel.classList.remove("show");
-  document.body.classList.add("keyboard-open");
-  updateBottomSpace(true);
+  // iOS 的 visualViewport resize 有时比键盘动画晚，补两次同步
+  setTimeout(syncViewport, 100);
+  setTimeout(syncViewport, 350);
   scrollToLatest();
-  setTimeout(() => updateBottomSpace(true), 100);
-  setTimeout(() => updateBottomSpace(true), 300);
-  setTimeout(updateViewportHeight, 100);
 });
-input.addEventListener("blur", () => setTimeout(updateViewportHeight, 100));
+input.addEventListener("blur", () => {
+  setTimeout(syncViewport, 100);
+  setTimeout(syncViewport, 350);
+});
 
 document.addEventListener("click", e => {
   if (!emojiPanel.contains(e.target) &&
