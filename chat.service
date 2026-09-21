@@ -1,0 +1,15 @@
+[Unit]
+Description=Shared Chat Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/chat
+ExecStart=/usr/bin/python3 /root/chat/server.py
+Restart=always
+RestartSec=3
+StandardOutput=append:/root/chat/chat.log
+StandardError=append:/root/chat/chat.log
+
+[Install]
+WantedBy=multi-user.target
